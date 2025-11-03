@@ -49,6 +49,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.agent_name = terminal_bench_cfg.agent_name
         self.sandboxes_dir = terminal_bench_cfg.sandboxes_dir
         self.max_episodes = terminal_bench_cfg.max_episodes
+        self.to_summarize = terminal_bench_cfg.to_summarize
 
         if self.generator_cfg.chat_template.name_or_path is not None:
             raise NotImplementedError("TerminalBenchGenerator doesn't support custom chat template")
@@ -105,6 +106,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                         "key": "fake_key",
                         "session_id": session_id,
                         "max_episodes": self.max_episodes,
+                        "summarization": self.to_summarize
                     },
                 ),
             )
