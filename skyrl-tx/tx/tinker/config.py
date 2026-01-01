@@ -1,6 +1,7 @@
 """Configuration for the Tinker engine."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -12,6 +13,12 @@ class EngineConfig(BaseModel):
     """Configuration for the Tinker engine."""
 
     base_model: str = Field(..., description="Base model name (e.g., Qwen/Qwen3-0.6B)")
+    backend: str = Field(default="jax", description="Backend to use for training and inference")
+    backend_config: dict = Field(
+        default_factory=dict,
+        description="Backend-specific configuration as JSON string",
+        json_schema_extra={"argparse_type": json.loads},
+    )
     checkpoints_base: AnyPath = Field(
         default=AnyPath("/tmp/tx_checkpoints"),
         description="Base path where checkpoints will be stored",
@@ -21,25 +28,18 @@ class EngineConfig(BaseModel):
         description="Database URL (e.g., postgresql://user:password@localhost:5432/tinker). If not set, uses TX_DATABASE_URL env var or defaults to SQLite",
         json_schema_extra={"argparse_type": str, "env_var": "TX_DATABASE_URL"},
     )
-    max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
-    max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
-    tensor_parallel_size: int = Field(default=1, description="Tensor parallelism degree to use for the model")
-    train_micro_batch_size: int = Field(
-        default=0,
-        description="Micro-batch size (measured in number of sequences) for gradient accumulation; 0 means disabled (use full batch)",
+    external_inference_url: str | None = Field(
+        default=None,
+        description="URL of the external inference engine. If set, sample requests will be sent to the external engine instead (currently only VLLM is supported).",
+        json_schema_extra={"argparse_type": str},
     )
-    sample_max_num_sequences: int = Field(
-        default=0,
-        description="Maximum batch size (measured in number of sequences) for sampling/generation; 0 means disabled (use full batch)",
+    external_inference_api_key: str = Field(
+        default="EMPTY",
+        description="API key for an external inference engine. If not provided will use vLLM 'EMPTY' key convention",
     )
-    enforce_eager: bool = Field(default=False, description="Disable JAX JIT compilation")
-    shard_attention_heads: bool = Field(
-        default=True,
-        description="Whether to shard attention linear layers (qkvo projections) across tensor parallel devices",
-    )
-    gradient_checkpointing: bool = Field(
-        default=False,
-        description="Whether to use gradient checkpointing (full recomputation strategy)",
+    external_inference_lora_base: Path = Field(
+        default=Path("/tmp/lora_models"),
+        description="Directory where LoRA models will be extracted for external inference engines",
     )
 
 
@@ -108,6 +108,11 @@ def config_to_argv(cfg: BaseModel) -> list[str]:
 
         if field.annotation is bool:
             argv.append(f"--{arg_name}" if value else f"--no-{arg_name}")
+        elif field.annotation is dict:
+            # Serialize dict to JSON string
+            if value:
+                argv.append(f"--{arg_name}")
+                argv.append(json.dumps(value))
         else:
             # Skip None values - let them use defaults or environment variables
             if value is not None:

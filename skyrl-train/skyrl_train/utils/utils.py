@@ -156,8 +156,8 @@ def validate_batch_sizes(cfg: DictConfig):
             ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
 
-    assert cfg.trainer.train_batch_size >= lcm_dp_size, (
-        f"train_batch_size ({cfg.trainer.train_batch_size}) should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
+    assert cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt >= lcm_dp_size, (
+        f"train_batch_size * n_samples_per_prompt ({cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt}) should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
         f"policy_dp_size={policy_dp_size}, "
         f"ref_dp_size={ref_dp_size if use_ref_model else 'None'}, "
         f"lcm_dp_size={lcm_dp_size}"
@@ -174,8 +174,8 @@ def validate_megatron_cfg(cfg: DictConfig):
         import flash_attn
 
         version = flash_attn.__version__
-        if version > "2.7.4.post1":
-            raise ValueError("flash_attn <= 2.7.4.post1 is required for using the megatron backend with flash_attn")
+        if version > "2.8.1":
+            logger.warning("flash_attn > 2.8.1 is not supported for using the megatron backend with flash_attn")
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
@@ -297,7 +297,20 @@ def validate_cfg(cfg: DictConfig):
         # LoRA enabled
         # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
         assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
-        assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
+        assert cfg.trainer.strategy in (
+            "fsdp",
+            "fsdp2",
+            "megatron",
+        ), "LoRA enabled requires fsdp/fsdp2/megatron training backend"
+
+        if cfg.trainer.target_modules is not None:
+            logger.warning(
+                "`trainer.target_modules` is deprecated, use `trainer.policy.model.lora.target_modules` or `trainer.critic.model.lora.target_modules` instead"
+            )
+        if cfg.trainer.exclude_modules is not None:
+            logger.warning(
+                "`trainer.exclude_modules` is deprecated, use `trainer.policy.model.lora.exclude_modules` or `trainer.critic.model.lora.exclude_modules` instead"
+            )
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
@@ -495,6 +508,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
     if cfg.trainer.strategy == "megatron":
+        # this is needed for megatron-core >= 0.15.0, which requires devices to be visible while importing megatron.core
+        env_vars["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
         # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
         # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
         env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
@@ -564,10 +579,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
     if SKYRL_PYTHONPATH_EXPORT:
         # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
-        # this is useful for dependencies that are baked into the docker image but that we don't want to ship + rebuild with UV (i.e. TransformerEngine)
-        # see https://github.com/ray-project/ray/issues/56697 for why this is needed
-        # note that this could potentially cause unexpected issues if there are overlapping installations between the base image
-        # and the pyproject.toml file - to resolve these, make sure to specify exact versions of dependencies in the pyproject.toml
+        # not recommended since it can cause unexpected conflicts with UV packages, but keeping for backwards compatibility
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
 

@@ -61,11 +61,21 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
-    if cfg.trainer.policy.model.lora.rank > 0:
+    if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
         engine_kwargs["enable_lora"] = True
         engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
         engine_kwargs["sleep_level"] = 1
         engine_kwargs["max_loras"] = 1
+        engine_kwargs["fully_sharded_loras"] = cfg.generator.fully_sharded_loras
+
+        # TODO(devpatel): Bandaid solution, replace this once we have a better solution for LoRA performance degradation on the vLLM side
+        if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
+            logger.warning(
+                "LoRA is enabled but generator.enforce_eager=true. "
+                "This combination causes significant performance degradation (2-3x slower generation). "
+                "Automatically setting enforce_eager=false for better performance. "
+            )
+            engine_kwargs["enforce_eager"] = False
 
     if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
         engine_kwargs["rope_scaling"] = rope_scaling

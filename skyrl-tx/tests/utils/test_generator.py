@@ -1,8 +1,8 @@
 from flax import nnx
 import jax.numpy as jnp
-from tx.models.outputs import CausalLMOutput
+from tx.models.types import CausalLMOutput
 from tx.tinker.types import SamplingParams
-from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache
+from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch
 
 
 class DummyModel(GeneratorMixin, nnx.Module):
@@ -87,3 +87,72 @@ def test_greedy_vs_sampled():
 
     assert generator_outputs_equal(batch_result, 0, single_greedy, 0)
     assert generator_outputs_equal(batch_result, 1, single_sample, 0)
+
+
+def test_prompt_logprobs():
+    """Test prompt logprobs computation."""
+    model = DummyModel(vocab_size=16)
+    prompt_length = 5
+    expected_length = prompt_length - 1  # We skip the first token
+
+    # Test with single sequence (batch_size=1)
+    input_ids, attention_mask = make_inputs(batch_size=1, prompt_length=prompt_length)
+    sampling = SamplingParams(max_tokens=4, temperature=0.0, seed=42)
+
+    # Test with prompt_logprobs=True
+    result_with = model.generate(input_ids, attention_mask, sampling_params=[sampling], prompt_logprobs=True)
+    assert result_with.prompt_logprobs is not None, "prompt_logprobs should not be None when enabled"
+    assert len(result_with.prompt_logprobs) == 1, "Should have prompt_logprobs for 1 sequence in batch"
+    assert (
+        len(result_with.prompt_logprobs[0]) == expected_length
+    ), f"prompt_logprobs should have length {expected_length} (prompt_length - 1)"
+
+    # Test with prompt_logprobs=False
+    result_without = model.generate(input_ids, attention_mask, sampling_params=[sampling], prompt_logprobs=False)
+    assert result_without.prompt_logprobs is None, "prompt_logprobs should be None when disabled"
+
+    # Test with batched generation
+    batch_size = 3
+    input_ids_batch, attention_mask_batch = make_inputs(batch_size=batch_size, prompt_length=prompt_length)
+    result_batch = model.generate(
+        input_ids_batch, attention_mask_batch, sampling_params=[sampling] * batch_size, prompt_logprobs=True
+    )
+
+    assert result_batch.prompt_logprobs is not None
+    assert len(result_batch.prompt_logprobs) == batch_size, f"Should have prompt_logprobs for {batch_size} sequences"
+    for i in range(batch_size):
+        assert (
+            len(result_batch.prompt_logprobs[i]) == expected_length
+        ), f"Sequence {i}: expected prompt_logprobs length {expected_length}"
+
+
+def test_top_k_filtering():
+    """Test apply_top_k_batch function directly."""
+    # Create test logits [batch_size, vocab_size]
+    logits = jnp.array([[1.0, 2.0, 3.0, 4.0, 5.0]])
+
+    # Test k=2: should keep only top 2 values (4.0 and 5.0)
+    filtered = apply_top_k_batch(logits, k_values=jnp.array([2]), max_k=2)
+    # Values below threshold should be -inf, and top 2 values should be unchanged
+    expected = jnp.array([[-jnp.inf, -jnp.inf, -jnp.inf, 4.0, 5.0]])
+    assert jnp.array_equal(filtered, expected)
+
+    # Test max_k=0: should not filter anything regardless of k_values
+    filtered = apply_top_k_batch(logits, k_values=jnp.array([2]), max_k=0)
+    assert jnp.array_equal(filtered, logits)
+
+    # Test k<=0 with max_k>0: should not filter that example
+    filtered = apply_top_k_batch(logits, k_values=jnp.array([-1]), max_k=5)
+    assert jnp.array_equal(filtered, logits)
+
+    # Test per-example k values in batch (second row has ties: two 3.0s)
+    logits_batch = jnp.array([[1.0, 2.0, 3.0, 4.0, 5.0], [5.0, 4.0, 3.0, 3.0, 1.0]])
+    filtered = apply_top_k_batch(logits_batch, k_values=jnp.array([2, 3]), max_k=3)
+    # Second row keeps exactly 3 values despite ties (5.0, 4.0, and first 3.0)
+    expected = jnp.array(
+        [
+            [-jnp.inf, -jnp.inf, -jnp.inf, 4.0, 5.0],
+            [5.0, 4.0, 3.0, -jnp.inf, -jnp.inf],
+        ]
+    )
+    assert jnp.array_equal(filtered, expected)

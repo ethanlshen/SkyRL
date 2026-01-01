@@ -75,17 +75,6 @@ General Training Configuration
 .. tip::
   If you're facing issues with tuning the right values for ``micro_train_batch_size_per_gpu``, ``policy_mini_batch_size`` and ``micro_forward_batch_size_per_gpu``, see ``utils/utils.py::validate_batch_sizes`` for details on constraints.
 
-Global LoRA Configuration
--------------------------
-
-.. code-block:: yaml
-
-    target_modules: "all-linear"
-    exclude_modules: null
-
-- ``target_modules``: Specifies which modules to apply LoRA to. Set to ``"all-linear"`` to apply LoRA to all linear layers, or provide a list of specific module names.
-- ``exclude_modules``: List of modules to exclude from LoRA application. Set to ``null`` to exclude none.
-
 Evaluation Configuration
 ------------------------------
 .. code-block:: yaml
@@ -195,6 +184,12 @@ Megatron Configuration
       transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
         # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
         ...
+      lora_config:
+        # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
+        lora_type: "lora"
+      # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
+      # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
+      empty_cuda_cache: true
 
 
 - ``megatron_config.tensor_model_parallel_size``: Tensor model parallel size for reducing memory across model parameters and activations. Sequence parallelism (unrelated to ulysses sequence parallelism) is also enabled by default if tensor parallel size is greater than 1.
@@ -209,6 +204,13 @@ Some rules for configuring these parameters:
 - ``dp_size = world_size / model_size``
 - ``world_size % (pp_size * ep_size * etp_size) == 0``
     - This means that ``ep_size * etp_size`` can scale independently of ``tp_size * cp_size``, and can go across data parallel ranks.
+
+.. warning::
+  
+  ``optimizer_config_kwargs.use_precision_aware_optimizer=true`` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820.
+
+  We recommend leaving this setting to ``false``
+
 
 .. _deepspeed-configurations:
 
@@ -259,6 +261,12 @@ This section configures the policy model used for training, including optimizer,
          alpha: 16                  # LoRA scaling parameter
          dropout: 0                 # LoRA dropout rate
          lora_sync_path: "/tmp/skyrl_lora_sync"  # Path for LoRA adapter sync
+         target_modules: "all-linear"  # Apply to all linear layers OR
+         # specify specific modules as a list
+         exclude_modules: null  # Modules to exclude from LoRA
+         # For FSDP, this corresponds to `init_lora_weights` in PEFT. See: https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig
+         # For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
+         init_method: "kaiming" # Initialization method for LoRA layers
      deepspeed_config: ${deepspeed_config.train}  # Reference to default deepspeed config
 
      optimizer_config:
@@ -278,6 +286,8 @@ This section configures the policy model used for training, including optimizer,
      use_torch_compile: false  # Enable torch compile for the entropy calculation
      record_memory: false  # Dump memory snapshot for debugging
 
+     model_config_kwargs: {}     # pass through kwargs to the HuggingFace model config for FSDP/Deepspeed training backends (i.e. for overriding vocab size, etc) - for megatron, use policy.megatron_config.transformer_config_kwargs instead
+
 - ``policy.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
 - ``policy.optimizer_config``: Optimizer configuration for the policy model
 - ``policy.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
@@ -294,6 +304,7 @@ LoRA (Low-Rank Adaptation) enables parameter-efficient fine-tuning by training o
 - ``policy.model.lora.alpha``: Scaling factor for LoRA updates.
 - ``policy.model.lora.dropout``: Dropout probability applied to LoRA layers. Helps prevent overfitting during training.
 - ``policy.model.lora.lora_sync_path``: Directory path where LoRA adapter weights are saved and synchronized between training and inference processes. Must be accessible to all workers in distributed setups.
+- ``policy.model.lora.init_method``: Initialization method for LoRA layers. For FSDP, this corresponds to `init_lora_weights <https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig.init_lora_weights>`_ in PEFT. 'kaiming' is mapped to 'true' by default for PEFT. For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
 
 
 Critic Configuration
@@ -310,6 +321,9 @@ We support similar configuration options as the policy model, including LoRA.
           rank: 0                    # LoRA rank (0 = disabled)
           alpha: 16                  # LoRA scaling parameter
           dropout: 0                 # LoRA dropout rate
+          target_modules: "all-linear"
+          exclude_modules: null  # Modules to exclude from LoRA
+          init_method: "kaiming" # Initialization method for LoRA layers
       deepspeed_config: ${deepspeed_config.train}
       optimizer_config:
         lr: 5.0e-6
@@ -322,6 +336,7 @@ We support similar configuration options as the policy model, including LoRA.
         reshard_after_forward: true
         fsdp_size: -1
       sequence_parallel_size: 1
+      model_config_kwargs: {} # pass through kwargs to the HuggingFace model config (i.e. for overriding vocab size, etc)
 
 
 Reference Model Configuration
@@ -339,6 +354,7 @@ Reference Model Configuration
         reshard_after_forward: true
         fsdp_size: -1
       sequence_parallel_size: 1
+      model_config_kwargs: {}     # pass through kwargs to the HuggingFace model config for FSDP/Deepspeed training backends (i.e. for overriding vocab size, etc) - for megatron, use ref.megatron_config.transformer_config_kwargs instead
 
 - ``ref.model.path``: Path to the reference model. Defaults to the policy model path, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
 - ``ref.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
@@ -418,6 +434,11 @@ Algorithm Configuration
       use_tis: false 
       tis_imp_ratio_cap: -1.0
 
+      # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
+      sapo:
+        tau_pos: 1.0
+        tau_neg: 1.05 # default values used in the paper with Qwen3-30B-A3B-Base
+
 - ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo``, ``gae``, ``rloo``, ``reinforce++``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
 - ``algorithm.kl_ctrl`` Configuration for the KL controller - only used if ``use_kl_in_reward`` is ``true`` (not applied in the case of ``use_kl_loss`` is ``true``). ``kl_loss_coef`` is used as the initial KL coefficient for both ``fixed`` and ``adaptive`` KL controllers.
 
@@ -478,6 +499,10 @@ Algorithm Configuration
   - ``cispo_eps_clip_low``: Offset for lower bound of importance sampling ratio clipping. Tokens with importance sampling ratio less than ``1 - cispo_eps_clip_low`` will have their ratio clipped, but can still be updated in the policy gradient update.
   - ``cispo_eps_clip_high``: Offset for upper bound of importance sampling ratio clipping. Tokens with importance sampling ratio greater than ``1 + cispo_eps_clip_high`` will have their ratio clipped, but can still be updated in the policy gradient update.
 
+- ``algorithm.sapo``: SAPO (as proposed in `this paper <https://arxiv.org/pdf/2511.20347>`) parameters (only used when ``policy_loss_type`` is ``sapo``):
+
+  - ``tau_pos``: Temperature for gating function for tokens with positive advantages.
+  - ``tau_neg``: Temperature for gating function for tokens with negative (or zero) advantages.
 
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -636,3 +661,4 @@ Misc Configuration
 
 - ``generator.zero_reward_on_non_stop``: Whether to set the reward to 0 if the `stop_reason` is not `stop`. Cases where this is useful: Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response, we typically don't want to reward it. This is a general setting for all environments.
 - ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.
+- ``generator.step_wise_trajectories``: Whether to return outputs in a step-wise fashion. If ``true``, then the generator will return multi-turn generations with the (prompt, response) pair of each turn being a separate trajectory. Advantages are computed based on the last step of each trajectory and propagated to the previous steps.
