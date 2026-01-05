@@ -172,8 +172,9 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         initial_prompt_length = len(initial_input_ids)
 
         # We remove trailing `user` messages - this is added by Mini-SWE-Agent to capture the final git diff for the trajectory
+        # print(response_messages)
         last_idx = len(response_messages) - 1
-        while response_messages[last_idx]["role"] == "user":
+        while response_messages and response_messages[last_idx]["role"] == "user":
             last_idx -= 1
         if last_idx < 0:
             raise ValueError(

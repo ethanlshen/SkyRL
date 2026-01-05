@@ -609,6 +609,9 @@ class PolicyWorkerBase(Worker):
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
 
+        # print("worker.py:", self.strategy)
+        # print("worker.py:", self.cfg.trainer.algorithm.policy_loss_type)
+
     def _normalize_mini_batch_size(self):
         """
         Normalize mini batch sizes to per-gpu mini batch sizes..
@@ -641,6 +644,8 @@ class PolicyWorkerBase(Worker):
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+            ### EXPLAIN: Run the forward pass again on the sequences to get log probs, and create computational graph
+
             # actor loss
             action_log_probs, output = self.model(
                 sequences,
@@ -652,6 +657,8 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
             )
             # loss function
+            ### EXPLAIN: So we have advantages (from GRPO, critic, etc.) and log probs. Now we formulate the full policy loss
+            # that we can backprop through. 
             # TODO: recompute advantages
             policy_loss, clip_ratio = self.policy_loss_fn(
                 action_log_probs,

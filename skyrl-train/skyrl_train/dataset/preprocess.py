@@ -89,6 +89,7 @@ def convert_prompts_responses_to_batch_tensors(
     sequences = []
     attention_masks = []
     action_masks = []
+    ### EXPLAIN: Left pad the prompt and right pad the answer so the answers all start at the same token position
     for i, prompt in enumerate(prompts):
         # left padding input
         input_len = prompt_token_lens[i]
@@ -106,7 +107,9 @@ def convert_prompts_responses_to_batch_tensors(
         action_masks.append(output_attention_mask)
 
     sequences = torch.tensor(sequences)
+    ### EXPLAIN: Attention mask is 1 where its not padding
     attention_mask = torch.tensor(attention_masks, dtype=torch.int64)
+    ### EXPLAIN: Action mask is attention mask of the output only (so zerod on the prompts)
     action_mask = torch.tensor(action_masks, dtype=torch.int64)
 
     # initialize ret loss masks to be the same as action mask
@@ -115,12 +118,15 @@ def convert_prompts_responses_to_batch_tensors(
         ret_loss_masks[i, : len(loss_mask)] = torch.tensor(loss_mask)
 
     # do the same for custom rewards
+    ### EXPLAIN: Rewards were prev. all converted to per token rewards, so now they are converted to
+    # tensors
     ret_rewards = torch.zeros_like(action_mask, dtype=torch.float)
     for i, custom_reward in enumerate(rewards):
         if isinstance(custom_reward, list):
             custom_reward = torch.tensor(custom_reward)
         ret_rewards[i, : len(custom_reward)] = custom_reward
 
+    ### EXPLAIN: Create logprobs tensor but in gsm8k its None so this is None
     logprobs_tensor = None
     if logprobs:
         max_output_len = action_mask.size(1)

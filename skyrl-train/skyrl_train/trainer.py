@@ -204,10 +204,18 @@ class RayPPOTrainer:
                         "train",
                         self.global_step,
                     )
+                    # print(f"RayPPOTrainer generator input: {generator_input}")
+                    ### EXPLAIN: Total batch size * number of rolluts per prompt of straight input text in conversation format
 
                     # 1.1 generation phase
                     with Timer("generate", self.all_timings):
                         generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
+
+                    # print(f"RayPPOTrainer generator output: {generator_output}")
+                    ### EXPLAIN: Total batch size * number of rolluts per prompt of token ids, rewards, loss masks, with GSMK loss masks are all 1s
+                    # This output contains the generated output in "response_ids" field
+
+                    ### QUESTION: Where do rewards come from?
 
                     if self.cfg.generator.step_wise_trajectories:
                         # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
@@ -229,7 +237,10 @@ class RayPPOTrainer:
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
                         generator_output = self.postprocess_generator_output(generator_output, uids)
-
+                        ### EXPLAIN: Convert to token level rewards from response lvel if needed. This IS the case with gsm8k.
+                        # This means [0, 1, ...] becomes [[0,..0], [0, .., 0, 1], ...] where the last token is set to the entire
+                        # response reward
+                    # print(f"RayPPOTrainer postprocessed generator output: {generator_output}")
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
                     log_example(
@@ -242,16 +253,20 @@ class RayPPOTrainer:
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
                         logger.info(f"Number of sequences: {len(training_input['sequences'])}")
-
+                        ### EXPLAIN: Tensorize everything and make attention mask, action masks, padded sequences
+                    # print(f"RayPPOTrainer training input initial: {training_input}")
                     # 1.4 inference and calculate values, log probs, rewards, kl divergence
                     with Timer("fwd_logprobs_values_reward", self.all_timings):
                         training_input = self.fwd_logprobs_values_reward(training_input)
-
+                        ### EXPLAIN: So now we have tensorized attention mask and tokens...time to get logprobs by forward pass
+                        # Logprobs for policy, ref, all calculated
+                    # print(f"RayPPOTrainer training input after values, rewards, kl, log probs: {training_input}")
                     # 1.5 apply kl divergence penalty to rewards
                     if self.cfg.trainer.algorithm.use_kl_in_reward:
                         with Timer("apply_reward_kl_penalty", self.all_timings):
                             training_input = self.apply_reward_kl_penalty(training_input)
-
+                            ### EXPLAIN: Calculates KL. This is skipped with GRPO. 
+                    # print(f"RayPPOTrainer training input after applying kl penalty to rewards: {training_input}")
                     # 3. calculate advantages and returns
                     with Timer("compute_advantages_and_returns", self.all_timings):
                         training_input = self.compute_advantages_and_returns(training_input)
@@ -262,7 +277,7 @@ class RayPPOTrainer:
 
                         if self.cfg.trainer.algorithm.advantage_batch_normalize:
                             training_input = normalize_advantages_dict(training_input)
-
+                    # print(f"RayPPOTrainer training input after advantages and returns: {training_input}")
                     if self.cfg.trainer.dump_data_batch:
                         # dump data to file
                         with Timer("dump_data_batch"):
@@ -270,6 +285,12 @@ class RayPPOTrainer:
 
                     # 4. train policy/critic model
                     # Policy model is backloaded to GPU during training
+
+                    ### EXPLAIN: This will train by taking the sequences, doing another forward pass so computational graph is set up.
+                    # Then, it uses the policy loss function to calculate the actual loss, which uses the log probs and advantage from previous.
+                    # Finally, it runs .backward() to update. In this fashion, the final reward for each rollout will cause equal updates
+                    # across tokens and then parameters. So the two places in ppo_utils are AdvantageEstimator and PolicyLoss.
+                    # AdvantageEstimator is GRPO but what is PolicyLoss?
                     with Timer("train_critic_and_policy", self.all_timings):
                         status = self.train_critic_and_policy(training_input)
 
@@ -726,6 +747,10 @@ class RayPPOTrainer:
         """
         token_level_rewards = data["rewards"]
 
+        # print("Compute advantage - token level rewards", token_level_rewards, token_level_rewards.nonzero())
+        ### With GSM its all response level. So the last token in the response has reward of 1. And then in GRPO calculation
+        # this 1 gets counted when .sum() token rewards
+
         if self.cfg.generator.step_wise_trajectories:
             is_last_step = data["is_last_step"].bool()
             response_mask = data["response_mask"]
@@ -904,12 +929,16 @@ class RayPPOTrainer:
                 self.critic_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # calculate ref log probs
+        ### EXPLAIN: If the ref model exists, run a forward pass to get ref model log probs. async_run_ray_method will
+        # run forward() on all actors that make up the ray group.
         if self.ref_model is not None:
             if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
                 self.ref_model.backload_to_gpu()
 
             base_action_log_probs_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
 
+        ### EXPLAIN: If ref model is colocated with the policy model, then force wait until the ref model pass is done
+        # by calling .get().
         if self.ref_model is not None:
             # handle colocate policy and ref model
             if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
@@ -921,6 +950,7 @@ class RayPPOTrainer:
             base_log_probs = None
 
         # calculate action log probs
+        ### EXPLAIN: Do the same as the ref model for the policy right now
         if self.colocate_all:
             self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
@@ -934,6 +964,8 @@ class RayPPOTrainer:
         # if not colocate_policy_ref, then need to gather base_log_probs
         # if self.critic_model is not None, then need to gather value
         if not self.colocate_all:
+            ### EXPLAIN: If we did not colocate, then we are still waiting on the forwrad passes from the policy and ref.
+            # Here, we .get() them.
             if not self.cfg.trainer.placement.colocate_policy_ref:
                 if self.critic_model is not None:
                     all_rank_values = ray.get(value_refs)
@@ -968,8 +1000,9 @@ class RayPPOTrainer:
 
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
-        training_input["values"] = values
+        training_input["values"] = values ### EXPLAIN: This is None for gsm8k.
 
+        ### EXPLAIN: Calculate train/inference mismatch if needed.
         if self.cfg.generator.sampling_params.logprobs is not None:
             # calculates the difference in probs between inference and trainer components
             # only consider response tokens

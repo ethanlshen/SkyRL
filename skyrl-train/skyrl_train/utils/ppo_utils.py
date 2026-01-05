@@ -1050,6 +1050,10 @@ def compute_grpo_outcome_advantage(
         - returns: Float[torch.Tensor, "batch_size seqlen"]
     """
     # this assumes response-level rewards
+
+    ### Have a UUID per prompt and we calculate the GRPO advantage against that for each prompt.
+    # So if 4 prompts, then the mean is from id2score and then the advantage is calculated using 0 or 1
+    # for that prompts rollout.
     scores = token_level_rewards.sum(dim=-1)
 
     id2score = defaultdict(list)
