@@ -5,12 +5,12 @@ set -x
 # uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset
 # bash examples/mini_swe_agent/run_mini_swe_8B.sh
 
-DATA_DIR="$HOME/data/swe_gym_subset"
+DATA_DIR="/weka/oe-adapt-default/ethans/SkyRL/swe_gym_subset"
 CKPT_PATH="$HOME/ckpts/llm_mini_swe"
 
 # Save trajectories here for debugging
 # NOTE: For a multi-node cluster, ensure that this is on NFS so that you can save all trajectories in the same path
-MINISWE_TRAJ_DIR="$HOME/mini_swe_agent_trajs"
+MINISWE_TRAJ_DIR="/weka/oe-adapt-default/ethans/SkyRL//mini_swe_agent_trajs"
 
 NUM_GPUS=8
 NNODES=1
