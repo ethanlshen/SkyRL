@@ -45,3 +45,6 @@ docs/_spelling/
 
 # uv lock files
 uv.lock
+
+swe_gym_subset/
+mini_swe_agent_trajs/
